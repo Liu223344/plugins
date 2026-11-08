@@ -13,10 +13,10 @@ test("浏览器登录会带上 API Key，并各用一个新 profile", async () =
   const plugin = await CCXPlugin({}, { signIn: fakeSignIn(calls) })
   const method = plugin.auth.methods[0]
 
-  const a = method.authorize({ apiKey: "sk-aaa" })
+  const a = await method.authorize({ baseURL: "https://x/v1", apiKey: "sk-aaa" })
   const ra = await a.callback()
 
-  const b = method.authorize({ apiKey: "sk-bbb" })
+  const b = await method.authorize({ baseURL: "https://x/v1", apiKey: "sk-bbb" })
   const rb = await b.callback()
 
   assert.equal(ra.type, "success")
@@ -29,7 +29,7 @@ test("浏览器登录会带上 API Key，并各用一个新 profile", async () =
 
 test("浏览器登录不填 Key 也能成功（之后可补）", async () => {
   const plugin = await CCXPlugin({}, { signIn: fakeSignIn([]) })
-  const r = await plugin.auth.methods[0].authorize({}).callback()
+  const r = await (await plugin.auth.methods[0].authorize({})).callback()
   assert.equal(r.type, "success")
   assert.equal(r.apiKey, "")
 })
@@ -63,14 +63,14 @@ test("登录会问 Base URL，并保存进账号", async () => {
   const m = plugin.auth.methods[0]
   assert.equal((await m.ask({}))?.key, "baseURL", "第一问问地址")
   assert.equal((await m.ask({ baseURL: "" }))?.key, "apiKey", "第二问问 Key")
-  const r = await m.authorize({ baseURL: "https://ccx.autobits.cc/v1", apiKey: "sk-x", profile: "" }).callback()
+  const r = await (await m.authorize({ baseURL: "https://ccx.autobits.cc/v1", apiKey: "sk-x", profile: "" })).callback()
   assert.equal(r.baseURL, "https://ccx.autobits.cc/v1")
   assert.equal(calls[0].baseURL, "https://ccx.autobits.cc/v1")
 })
 
 test("地址留空用官方地址", async () => {
   const plugin = await CCXPlugin({}, { signIn: async (a) => ({ username: "u", email: "e@x", balance: 1, profile: a.profileId }) })
-  const r = await plugin.auth.methods[0].authorize({ baseURL: "", apiKey: "", profile: "" }).callback()
+  const r = await (await plugin.auth.methods[0].authorize({ baseURL: "", apiKey: "", profile: "" })).callback()
   assert.equal(r.baseURL, "https://ccx.autobits.cc/v1")
 })
 
@@ -80,4 +80,13 @@ test("只填 Key 的方法也要地址", async () => {
   assert.equal(m.prompts[0].key, "baseURL")
   const r = await m.authorize({ baseURL: "https://relay.example/v1", apiKey: "sk-y" })
   assert.equal(r.metadata.baseURL, "https://relay.example/v1")
+})
+
+test("浏览器登录必须声明 prompts，否则 Magpie 会丢掉用户填的答案", async () => {
+  const plugin = await CCXPlugin({}, { signIn: async (a) => ({ username: "u", email: "e@x", balance: 1, profile: a.profileId }) })
+  const oauth = plugin.auth.methods.find((m) => m.type === "oauth")
+  assert.ok(Array.isArray(oauth.prompts) && oauth.prompts.length > 0,
+    "host.js 用 m.prompts?.length 决定要不要传 inputs，空数组会让地址和 Key 全部丢失")
+  assert.ok(oauth.prompts.some((p) => p.key === "baseURL"))
+  assert.ok(oauth.prompts.some((p) => p.key === "apiKey"))
 })

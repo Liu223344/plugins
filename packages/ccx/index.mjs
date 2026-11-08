@@ -75,7 +75,12 @@ export async function CCXPlugin({ client } = {}, options = {}) {
         {
           type: "oauth",
           label: "浏览器登录（余额 + 签到 + 模型）",
-          prompts: [],
+          // 必须非空：Magpie 的宿主在 prompts 为空时会把用户填的答案整个丢掉
+          // （host.js: m.prompts?.length ? inputs : undefined）
+          prompts: [
+            { type: "text", key: "baseURL", message: "API 请求地址（OpenAI 兼容）", placeholder: DEFAULT_BASE },
+            { type: "password", key: "apiKey", required: false, message: "API Key（可留空）", placeholder: "sk-..." },
+          ],
           // 动态问两个问题：
           // 1. API Key（可留空，但留空就不能调模型）
           // 2. 复用哪个已登录的浏览器；选「开新窗口」才需要重新登录
@@ -109,7 +114,9 @@ export async function CCXPlugin({ client } = {}, options = {}) {
             }
             return null
           },
-          authorize(inputs) {
+          async authorize(inputs) {
+            // 前面的提问（ask）已经把答案攒进 inputs；这里再兜一层，
+            // 万一宿主没传，就当作空值（baseURL 用默认地址）。
             const apiKey = String(inputs?.apiKey ?? "").trim()
             const baseURL = String(inputs?.baseURL ?? "").trim() || DEFAULT_BASE
             const reuse = String(inputs?.profile ?? "").trim()
