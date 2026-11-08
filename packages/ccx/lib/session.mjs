@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { access, mkdir, rename, writeFile } from "node:fs/promises"
-import { existsSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { homedir } from "node:os"
 import { launch } from "./cdp.mjs"
@@ -23,14 +23,42 @@ export function freshProfile() {
   return dir
 }
 
+// 已经登录过的浏览器（供「复用已有登录」选择），带可读的名字。
+// 只列确认登录成功的：原来那个工具的 4 个账号，或插件建过且写下了账号信息的。
+export function existingProfiles() {
+  const out = []
+  const legacyRoot = join(home(), "ccx-checkin", "profiles")
+  try {
+    for (const name of readdirSync(legacyRoot)) {
+      const p = join(legacyRoot, name)
+      if (existsSync(join(p, "Default"))) out.push({ path: p, label: name })
+    }
+  } catch {}
+  const ownRoot = join(configRoot(), "magpie", "ccx-browser")
+  try {
+    for (const name of readdirSync(ownRoot)) {
+      const p = join(ownRoot, name)
+      if (!existsSync(join(p, "Default"))) continue
+      let a = null
+      try { a = JSON.parse(readFileSync(join(p, "account.json"), "utf8")) } catch {}
+      // 只认写下了邮箱的（真正的登录）；「AutoBits 账号」是旧版本留下的空记录
+      if (a?.email) out.push({ path: p, label: a.email })
+    }
+  } catch {}
+  return out
+}
+
 export function profileOf(auth) {
   if (process.env.CCX_BROWSER_ROOT) return join(resolve(process.env.CCX_BROWSER_ROOT), fingerprint(auth))
   const pid = auth?.profileId
   // 浏览器登录的账号，profileId 就是它的 profile 目录（新建时可能还不存在）
   if (typeof pid === "string" && pid.startsWith("/")) return pid
   // 复用独立签到工具已有的登录状态（~/ccx-checkin/profiles/<账号名>）
-  const legacy = join(home(), "ccx-checkin", "profiles", pid ?? auth?.username ?? "")
-  if (existsSync(legacy)) return legacy
+  const name = String(pid ?? auth?.username ?? "").trim()
+  if (name && !name.includes("/")) {
+    const legacy = join(home(), "ccx-checkin", "profiles", name)
+    if (existsSync(join(legacy, "Default"))) return legacy
+  }
   return join(configRoot(), "magpie", "ccx-browser", fingerprint(auth))
 }
 
@@ -89,20 +117,32 @@ export async function storeCredentials(auth, data) {
   return next
 }
 
-// 新增账号：永远开一个新的可见浏览器窗口，让用户自己登录。
-// 不复用任何已有 profile —— 那会把新账号登录成第一个号。
+// 登录：
+// - auth.reuseProfile 给了路径 → 复用那个已登录的浏览器（无窗口，几秒完成）
+// - 否则 → 开一个新的可见窗口，让用户登录要新增的账号
 export async function signIn(auth, { browser, signal, timeoutMs = 8 * 60_000 } = {}) {
-  const profile = auth?.profileId && String(auth.profileId).startsWith("/") && !existsSync(auth.profileId)
+  const reuse = typeof auth?.reuseProfile === "string" && auth.reuseProfile
+    ? auth.reuseProfile
+    : null
+  const profile = reuse ?? (auth?.profileId && String(auth.profileId).startsWith("/") && !existsSync(auth.profileId)
     ? auth.profileId
-    : freshProfile()
+    : freshProfile())
   auth = { ...auth, profileId: profile }
 
-  const session = await open(auth, { headless: false, browser })
+  const session = await open(auth, { headless: Boolean(reuse), browser })
   try {
-    const status = await waitForSignIn(session.page, { signal, timeoutMs })
-    const name = status.me?.name ?? status.me?.username ?? status.me?.email ?? ""
-    await storeCredentials(auth, { username: name, balance: status.balance, profile })
-    return { username: name, balance: status.balance, profile }
+    const status = reuse
+      ? await (async () => {
+        await waitWalletReady(session.page, { timeoutMs: 30000 })
+        const st = await readStatus(session.page, { timeoutMs: 20000 })
+        if (st.status !== 200) throw new Error(st.unauthorized ? "这个浏览器里的登录已失效" : (st.error || "读取失败"))
+        return st
+      })()
+      : await waitForSignIn(session.page, { signal, timeoutMs })
+    const name = status.me?.user?.displayName ?? status.me?.user?.email ?? ""
+    const email = status.me?.user?.email ?? ""
+    await storeCredentials(auth, { username: name, email, balance: status.balance, profile })
+    return { username: name, email, balance: status.balance, profile }
   } finally { await session.close() }
 }
 

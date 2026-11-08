@@ -59,7 +59,14 @@ export async function readStatus(page, { timeoutMs = 60000 } = {}) {
       const ck = await fetch(`/api/account/wallet/checkin?timezone=${tz}`, { credentials: "include", headers })
       const ckBody = ck.ok ? await ck.json() : null
 
-      return { status: 200, balance: walletBody?.balanceUnits, checkin: ckBody }
+      // 账号名：/api/account/me 给 displayName 和 email
+      let me = null
+      try {
+        const r = await fetch("/api/account/me", { credentials: "include", headers })
+        if (r.ok) me = await r.json()
+      } catch {}
+
+      return { status: 200, balance: walletBody?.balanceUnits, checkin: ckBody, me }
     }).catch((e) => ({ error: String(e) }))
     if (r.status === 200 || r.unauthorized) return r
     last = r.error || ""

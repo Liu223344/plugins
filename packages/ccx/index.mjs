@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { readUsage, signIn, checkin, listModels, freshProfile } from "./lib/session.mjs"
+import { readUsage, signIn, checkin, listModels, freshProfile, existingProfiles } from "./lib/session.mjs"
 
 const ID = "ccx"
 const NAME = "AutoBits AI Hub"
@@ -58,22 +58,38 @@ export async function CCXPlugin({ client } = {}, options = {}) {
       methods: [
         {
           type: "oauth",
-          label: "浏览器登录（推荐：余额 + 签到 + 填 Key）",
-          prompts: [
-            {
-              type: "password",
-              key: "apiKey",
-              required: false,
-              message: "AutoBits 的 API Key（调模型用；可留空，登录后再填）",
-              placeholder: "sk-...",
-            },
-          ],
+          label: "浏览器登录（余额 + 签到 + 模型）",
+          prompts: [],
+          // 动态问两个问题：
+          // 1. API Key（可留空，但留空就不能调模型）
+          // 2. 复用哪个已登录的浏览器；选「开新窗口」才需要重新登录
+          async ask(inputs = {}) {
+            if (!("apiKey" in inputs)) {
+              return {
+                type: "password",
+                key: "apiKey",
+                message: "AutoBits 的 API Key（调模型用；留空则只能读余额和签到）",
+                placeholder: "sk-...",
+              }
+            }
+            if (!("profile" in inputs)) {
+              const opts = existingProfiles().map((p) => ({ value: p.path, label: p.label }))
+              return {
+                type: "select",
+                key: "profile",
+                message: opts.length
+                  ? "用哪个浏览器登录？（已登录的直接选，不用重新输密码）"
+                  : "用哪个浏览器登录？",
+                options: [...opts, { value: "", label: "开新窗口登录新账号" }],
+              }
+            }
+            return null
+          },
           authorize(inputs) {
-            // 每次都开一个新的浏览器窗口，让用户登录要新增的那个账号。
-            // 绝不复用已有 profile —— 那会把新账号登成第一个号。
-            const profile = freshProfile()
             const apiKey = String(inputs?.apiKey ?? "").trim()
-            const auth = { type: "oauth", profileId: profile, apiKey }
+            const reuse = String(inputs?.profile ?? "").trim()
+            const profile = reuse || freshProfile()
+            const auth = { type: "oauth", profileId: profile, apiKey, reuseProfile: reuse || undefined }
             const pending = doSignIn(auth, { ...options })
               .then((info) => ({ ok: true, info }))
               .catch((e) => ({ ok: false, error: e?.message ?? String(e) }))
@@ -81,11 +97,14 @@ export async function CCXPlugin({ client } = {}, options = {}) {
               url: "",
               opened: true,
               method: "auto",
-              instructions: "登录窗口会打开，请在窗口里登录要添加的 AutoBits 账号。登录成功后窗口自动关闭。",
+              instructions: reuse
+                ? "正在用你选的浏览器读取登录状态，几秒就好。"
+                : "登录窗口会打开，请在窗口里登录要添加的 AutoBits 账号。",
               async callback() {
                 const r = await pending
                 if (!r.ok) return { type: "failed", error: r.error }
                 const realId = r.info.profile ?? profile
+                const who = r.info.email || r.info.username || realId
                 return {
                   type: "success",
                   access: apiKey,
@@ -93,8 +112,8 @@ export async function CCXPlugin({ client } = {}, options = {}) {
                   expires: 0,
                   apiKey,
                   profileId: realId,
-                  accountId: r.info.username || `ccx-${realId}`,
-                  username: r.info.username || "AutoBits 账号",
+                  accountId: who,
+                  username: r.info.username || r.info.email || "AutoBits 账号",
                 }
               },
             }
@@ -102,7 +121,7 @@ export async function CCXPlugin({ client } = {}, options = {}) {
         },
         {
           type: "api",
-          label: "只填 API Key（不读余额、不签到）",
+          label: "只填 API Key（只调模型）",
           prompts: [
             { type: "password", key: "apiKey", message: "AutoBits 的 LLM API Key", placeholder: "sk-..." },
           ],
@@ -110,39 +129,6 @@ export async function CCXPlugin({ client } = {}, options = {}) {
             const key = String(inputs?.apiKey ?? "").trim()
             if (!key) return { type: "failed", error: "请输入 API Key" }
             return { type: "success", key }
-          },
-        },
-        {
-          type: "oauth",
-          label: "只浏览器登录（不调模型）",
-          prompts: [],
-          authorize() {
-            const profile = freshProfile()
-            const auth = { type: "oauth", profileId: profile }
-            const pending = doSignIn(auth, { ...options })
-              .then((info) => ({ ok: true, info }))
-              .catch((e) => ({ ok: false, error: e?.message ?? String(e) }))
-            return {
-              url: "",
-              opened: true,
-              method: "auto",
-              instructions: "登录窗口会打开，请登录要添加的 AutoBits 账号。",
-              async callback() {
-                const r = await pending
-                if (!r.ok) return { type: "failed", error: r.error }
-                const realId = r.info.profile ?? profile
-                return {
-                  type: "success",
-                  access: "",
-                  refresh: "",
-                  expires: 0,
-                  apiKey: "",
-                  profileId: realId,
-                  accountId: r.info.username || `ccx-${realId}`,
-                  username: r.info.username || "AutoBits 账号",
-                }
-              },
-            }
           },
         },
       ],
