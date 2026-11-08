@@ -7,7 +7,13 @@
   "exports": {
     ".": "./opencode2.mjs"
   },
-  "files": ["index.mjs", "opencode.mjs", "opencode2.mjs", "lib/", "README.md"],
+  "files": [
+    "index.mjs",
+    "opencode.mjs",
+    "opencode2.mjs",
+    "lib/",
+    "README.md"
+  ],
   "license": "MIT",
   "magpie": {
     "maxConcurrency": 4,

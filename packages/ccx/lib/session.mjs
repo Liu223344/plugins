@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto"
 import { access, mkdir, rename, writeFile } from "node:fs/promises"
-import { readdirSync, readFileSync } from "node:fs"
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { homedir } from "node:os"
@@ -18,42 +17,21 @@ export function fingerprint(auth) {
   ].map((x) => String(x ?? "")).join("\0")).digest("hex").slice(0, 20)
 }
 
-// 浏览器登录：优先用一个已经登录过的 profile，这样点「浏览器登录」时
-// 不用重新输密码。找不到才新建一个让用户登录。
-export function existingProfiles() {
-  const out = []
-  const legacyRoot = join(home(), "ccx-checkin", "profiles")
-  try {
-    for (const name of readdirSync(legacyRoot)) {
-      const p = join(legacyRoot, name)
-      if (existsSync(join(p, "Default"))) out.push(p)
-    }
-  } catch {}
-  const ownRoot = join(configRoot(), "magpie", "ccx-browser")
-  try {
-    for (const name of readdirSync(ownRoot)) {
-      const p = join(ownRoot, name)
-      if (existsSync(join(p, "Default"))) out.push(p)
-    }
-  } catch {}
-  return out
+// 新增账号时用一个全新的浏览器 profile，绝不复用别的账号的登录状态。
+export function freshProfile() {
+  const dir = join(configRoot(), "magpie", "ccx-browser", `acct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+  return dir
 }
 
 export function profileOf(auth) {
   if (process.env.CCX_BROWSER_ROOT) return join(resolve(process.env.CCX_BROWSER_ROOT), fingerprint(auth))
-  // 登录时记录的实际 profile 路径优先（浏览器登录会复用一个已登录的 profile）
   const pid = auth?.profileId
-  if (typeof pid === "string" && pid.startsWith("/") && existsSync(pid)) return pid
+  // 浏览器登录的账号，profileId 就是它的 profile 目录（新建时可能还不存在）
+  if (typeof pid === "string" && pid.startsWith("/")) return pid
   // 复用独立签到工具已有的登录状态（~/ccx-checkin/profiles/<账号名>）
   const legacy = join(home(), "ccx-checkin", "profiles", pid ?? auth?.username ?? "")
   if (existsSync(legacy)) return legacy
-  const own = join(configRoot(), "magpie", "ccx-browser", fingerprint(auth))
-  // 这个账号如果登录时复用了别的 profile，就以那个为准
-  try {
-    const pointer = JSON.parse(readFileSync(join(own, "account.json"), "utf8"))
-    if (typeof pointer?.profile === "string" && existsSync(pointer.profile)) return pointer.profile
-  } catch {}
-  return own
+  return join(configRoot(), "magpie", "ccx-browser", fingerprint(auth))
 }
 
 const lockOf = (profile) => join(configRoot(), "magpie", "ccx-browser-locks", createHash("sha256").update(profile).digest("hex"))
@@ -111,44 +89,20 @@ export async function storeCredentials(auth, data) {
   return next
 }
 
-// 先看已有 profile 里有没有已登录的（后台、无窗口，几秒就好）。
-// 有就直接用，不用打扰用户；都没有才开可见窗口让用户登录。
-async function tryExistingProfiles({ browser } = {}) {
-  for (const profile of existingProfiles()) {
-    let session
-    try {
-      const release = await take(lockOf(profile))
-      try {
-        const started = await launch(await requireBrowser(browser), args(profile, true, WALLET))
-        session = { ...started, close: async () => { try { await started.browser.close() } finally { release() } } }
-        await waitWalletReady(session.page, { timeoutMs: 15000 })
-        const status = await readStatus(session.page, { timeoutMs: 10000 })
-        if (status.status === 200) return { profile, status }
-      } finally {
-        await session?.close().catch(() => {})
-        if (!session) release()
-      }
-    } catch {}
-  }
-  return null
-}
-
+// 新增账号：永远开一个新的可见浏览器窗口，让用户自己登录。
+// 不复用任何已有 profile —— 那会把新账号登录成第一个号。
 export async function signIn(auth, { browser, signal, timeoutMs = 8 * 60_000 } = {}) {
-  // 1. 已有登录状态？直接复用，用户什么都不用做
-  const found = await tryExistingProfiles({ browser })
-  if (found) {
-    const name = found.status.me?.name ?? found.status.me?.username ?? found.status.me?.email ?? ""
-    // 把这个 profile 记到当前账号名下，之后读余额/签到都用它
-    await storeCredentials(auth, { username: name, balance: found.status.balance, profile: found.profile })
-    return { username: name, balance: found.status.balance, profile: found.profile }
-  }
-  // 2. 没有：开一个可见窗口，让用户登录
+  const profile = auth?.profileId && String(auth.profileId).startsWith("/") && !existsSync(auth.profileId)
+    ? auth.profileId
+    : freshProfile()
+  auth = { ...auth, profileId: profile }
+
   const session = await open(auth, { headless: false, browser })
   try {
     const status = await waitForSignIn(session.page, { signal, timeoutMs })
     const name = status.me?.name ?? status.me?.username ?? status.me?.email ?? ""
-    await storeCredentials(auth, { username: name, balance: status.balance })
-    return { username: name, balance: status.balance }
+    await storeCredentials(auth, { username: name, balance: status.balance, profile })
+    return { username: name, balance: status.balance, profile }
   } finally { await session.close() }
 }
 

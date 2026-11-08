@@ -1,20 +1,31 @@
 import { randomUUID } from "node:crypto"
-import { readUsage, signIn, checkin, listModels } from "./lib/session.mjs"
+import { readUsage, signIn, checkin, listModels, freshProfile } from "./lib/session.mjs"
 
 const ID = "ccx"
 const NAME = "AutoBits AI Hub"
-const API_BASE = "https://ccx.autobits.cc/v1"
+// 官方文档给的三个地址：OpenAI 兼容在 /v1，Claude 在根路径，Gemini 在 /v1beta
+const OPENAI_BASE = "https://ccx.autobits.cc/v1"
+const ANTHROPIC_BASE = "https://ccx.autobits.cc"
+const GEMINI_BASE = "https://ccx.autobits.cc/v1beta"
 
 export function fingerprint(auth) {
   return auth?.profileId ?? auth?.apiKey ?? auth?.access ?? auth?.key ?? randomUUID()
 }
 
 export async function CCXPlugin({ client } = {}, options = {}) {
+  // 测试时可注入一个假的登录函数（真机永远用 signIn）
+  const doSignIn = typeof options.signIn === "function" ? options.signIn : signIn
+
   return {
     config: async (cfg) => {
       cfg.provider ??= {}
       cfg.provider[ID] ??= {}
-      Object.assign(cfg.provider[ID], { name: NAME, npm: "@ai-sdk/openai-compatible", api: API_BASE, models: cfg.provider[ID].models ?? {} })
+      Object.assign(cfg.provider[ID], {
+        name: NAME,
+        npm: "@ai-sdk/openai-compatible",
+        api: OPENAI_BASE,
+        models: cfg.provider[ID].models ?? {},
+      })
     },
     provider: {
       id: ID,
@@ -25,7 +36,16 @@ export async function CCXPlugin({ client } = {}, options = {}) {
           const rows = await listModels(key)
           const out = { ...(provider?.models ?? {}) }
           for (const row of rows) {
-            out[row.id] = { name: row.name, api: { id: row.id, npm: "@ai-sdk/openai-compatible", url: API_BASE } }
+            const id = row.id
+            // Claude 模型走 Anthropic 协议，其余走 OpenAI 兼容
+            const anthropic = /claude|sonnet|opus|haiku/i.test(id)
+            const npm = anthropic ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible"
+            const url = anthropic ? ANTHROPIC_BASE : OPENAI_BASE
+            const model = { name: row.name || id, api: { id, npm, url } }
+            if (row.context) model.limit = { context: Number(row.context) }
+            if (row.output) model.limit = { ...(model.limit ?? {}), output: Number(row.output) }
+            if (row.modalities) model.modalities = row.modalities
+            out[id] = model
           }
           return out
         } catch {
@@ -37,42 +57,80 @@ export async function CCXPlugin({ client } = {}, options = {}) {
       provider: ID,
       methods: [
         {
-          type: "api",
-          label: "API Key",
-          prompts: [
-            { type: "password", key: "apiKey", message: "AutoBits 的 LLM API Key", placeholder: "sk-..." },
-          ],
-          async authorize(inputs) {
-            const key = String(inputs?.apiKey ?? "").trim()
-            if (!key) return { type: "failed", error: "请输入 API Key" }
-            // api 方法由 Magpie 存成 {type:"api", key}，这里只确认拿到 key
-            return { type: "success", key }
-          },
-        },
-        {
           type: "oauth",
-          label: "浏览器登录",
-          prompts: [],
-          authorize() {
-            const profileId = fingerprint({ apiKey: randomUUID() })
-            const auth = { type: "oauth", profileId }
-            // authorize 必须立刻返回（Magpie 只等几秒），登录在后台进行；
-            // callback 等它结束。opened:true 表示插件自己开浏览器，
-            // Magpie 不会再开一次（两个窗口会冲突）。
-            const pending = signIn(auth, { ...options })
+          label: "浏览器登录（推荐：余额 + 签到 + 填 Key）",
+          prompts: [
+            {
+              type: "password",
+              key: "apiKey",
+              required: false,
+              message: "AutoBits 的 API Key（调模型用；可留空，登录后再填）",
+              placeholder: "sk-...",
+            },
+          ],
+          authorize(inputs) {
+            // 每次都开一个新的浏览器窗口，让用户登录要新增的那个账号。
+            // 绝不复用已有 profile —— 那会把新账号登成第一个号。
+            const profile = freshProfile()
+            const apiKey = String(inputs?.apiKey ?? "").trim()
+            const auth = { type: "oauth", profileId: profile, apiKey }
+            const pending = doSignIn(auth, { ...options })
               .then((info) => ({ ok: true, info }))
               .catch((e) => ({ ok: false, error: e?.message ?? String(e) }))
             return {
               url: "",
               opened: true,
               method: "auto",
-              instructions: "登录窗口会自己打开。请完成登录（密码、验证码或通行密钥），完成后自动结束。",
+              instructions: "登录窗口会打开，请在窗口里登录要添加的 AutoBits 账号。登录成功后窗口自动关闭。",
               async callback() {
                 const r = await pending
                 if (!r.ok) return { type: "failed", error: r.error }
-                // profileId 必须是实际用到的那个浏览器 profile，
-                // 否则读余额/签到时找不到登录状态。
-                const realId = r.info.profile ?? profileId
+                const realId = r.info.profile ?? profile
+                return {
+                  type: "success",
+                  access: apiKey,
+                  refresh: "",
+                  expires: 0,
+                  apiKey,
+                  profileId: realId,
+                  accountId: r.info.username || `ccx-${realId}`,
+                  username: r.info.username || "AutoBits 账号",
+                }
+              },
+            }
+          },
+        },
+        {
+          type: "api",
+          label: "只填 API Key（不读余额、不签到）",
+          prompts: [
+            { type: "password", key: "apiKey", message: "AutoBits 的 LLM API Key", placeholder: "sk-..." },
+          ],
+          async authorize(inputs) {
+            const key = String(inputs?.apiKey ?? "").trim()
+            if (!key) return { type: "failed", error: "请输入 API Key" }
+            return { type: "success", key }
+          },
+        },
+        {
+          type: "oauth",
+          label: "只浏览器登录（不调模型）",
+          prompts: [],
+          authorize() {
+            const profile = freshProfile()
+            const auth = { type: "oauth", profileId: profile }
+            const pending = doSignIn(auth, { ...options })
+              .then((info) => ({ ok: true, info }))
+              .catch((e) => ({ ok: false, error: e?.message ?? String(e) }))
+            return {
+              url: "",
+              opened: true,
+              method: "auto",
+              instructions: "登录窗口会打开，请登录要添加的 AutoBits 账号。",
+              async callback() {
+                const r = await pending
+                if (!r.ok) return { type: "failed", error: r.error }
+                const realId = r.info.profile ?? profile
                 return {
                   type: "success",
                   access: "",
@@ -91,7 +149,8 @@ export async function CCXPlugin({ client } = {}, options = {}) {
       async loader(getAuth) {
         const auth = await getAuth()
         const key = auth?.apiKey ?? auth?.access ?? auth?.key
-        return { baseURL: API_BASE, apiKey: key }
+        // 默认 OpenAI 兼容地址；Claude 模型在 models 里已各自指定 url
+        return { baseURL: OPENAI_BASE, apiKey: key }
       },
       async usage(getAuth) {
         const auth = await getAuth()

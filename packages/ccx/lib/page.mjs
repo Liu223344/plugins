@@ -157,10 +157,24 @@ export function walletCard(status) {
   }
 }
 
-// 模型列表：公开 API，用 API Key 即可，不需要浏览器
+// 模型列表：OpenAI 兼容的 /v1/models，用 API Key 拉取。
+// 返回的模型信息尽量完整（上下文长度、是否支持图片等），供 Magpie 展示。
 export async function listModels(key) {
-  const r = await fetch(`${SITE}/v1/models`, { headers: { Authorization: `Bearer ${key}`, Accept: "application/json" } })
+  if (!key) return []
+  const r = await fetch(`${SITE}/v1/models`, {
+    headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+  })
   if (!r.ok) return []
   const data = await r.json()
-  return (data.data ?? data.models ?? []).map((m) => ({ id: m.id, name: m.id }))
+  const rows = data?.data ?? data?.models ?? []
+  return rows.map((m) => {
+    const id = m.id ?? m.model ?? m.name
+    return {
+      id,
+      name: m.display_name ?? m.displayName ?? m.name ?? id,
+      context: m.context_length ?? m.contextLength ?? m.context_window ?? m.max_context_tokens,
+      output: m.max_output_tokens ?? m.maxOutputTokens,
+      modalities: m.modalities,
+    }
+  }).filter((m) => m.id)
 }
