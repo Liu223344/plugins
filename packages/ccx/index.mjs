@@ -70,14 +70,17 @@ export async function CCXPlugin({ client } = {}, options = {}) {
               async callback() {
                 const r = await pending
                 if (!r.ok) return { type: "failed", error: r.error }
+                // profileId 必须是实际用到的那个浏览器 profile，
+                // 否则读余额/签到时找不到登录状态。
+                const realId = r.info.profile ?? profileId
                 return {
                   type: "success",
                   access: "",
                   refresh: "",
                   expires: 0,
                   apiKey: "",
-                  profileId,
-                  accountId: r.info.username || `ccx-${profileId}`,
+                  profileId: realId,
+                  accountId: r.info.username || `ccx-${realId}`,
                   username: r.info.username || "AutoBits 账号",
                 }
               },

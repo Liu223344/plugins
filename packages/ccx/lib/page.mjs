@@ -85,53 +85,72 @@ export async function waitForSignIn(page, { signal, timeoutMs = 8 * 60_000 } = {
   throw new Error("登录超时，请重试")
 }
 
-// 签到：先读状态，没签才发领取请求。重复调用不会重复领取。
+// 签到：点页面上真正的签到按钮，让网站前端自己处理 CSRF proof。
+// 直接 POST 会 403（invalid CSRF proof），必须走前端。
 export async function claim(page) {
-  return page.evaluate(async () => {
-    const org = (() => { try { return sessionStorage.getItem("cch:active-org-selection") } catch { return null } })()
-    const headers = { Accept: "application/json" }
-    if (org) headers["X-CCH-Organization"] = org
-    const tz = encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai")
-    const url = `/api/account/wallet/checkin?timezone=${tz}`
+  // 先读状态
+  const status = await readStatus(page, { timeoutMs: 30000 })
+  if (status.unauthorized) return { outcome: "failed", message: "登录已失效，请重新登录" }
+  if (status.status !== 200) return { outcome: "failed", message: status.error || "钱包读取失败" }
+  const ck = status.checkin
+  if (ck?.enabled === false) return { outcome: "inactive", message: "签到活动目前没有开放" }
+  if (ck?.checkedInToday) return { outcome: "done", streak: ck.streakDays, credit: toDollars(ck.todayRewardUnits) }
 
-    const before = await fetch(url, { credentials: "include", headers })
-    if (before.status === 401 || before.status === 403) return { outcome: "failed", message: "登录已失效，请重新登录" }
-    if (!before.ok) return { outcome: "failed", message: `签到状态读取失败 (${before.status})` }
-    const st = await before.json()
-    if (st?.enabled === false) return { outcome: "inactive", message: "签到活动目前没有开放" }
-    if (st?.checkedInToday) return { outcome: "done", streak: st.streakDays, credit: st.todayRewardUnits }
-
-    const post = await fetch(url, { method: "POST", credentials: "include", headers })
-    if (post.status === 401 || post.status === 403) return { outcome: "failed", message: "登录已失效，请重新登录" }
-    let body = null
-    try { body = await post.json() } catch {}
-    if (post.status === 428 || body?.challenge) return { outcome: "captcha", message: "请在官网钱包页完成验证" }
-    const code = Number(body?.code)
-    if (code === 30275 || /今天已经签到|今日已签/.test(String(body?.message ?? ""))) return { outcome: "done" }
-    if (code === 30274) return { outcome: "inactive", message: "签到活动目前没有开放" }
-    if (!post.ok) return { outcome: "failed", message: body?.message || body?.detail || `签到失败 (${post.status})` }
-
-    const after = await fetch(url, { credentials: "include", headers })
-    const now = after.ok ? await after.json() : null
-    if (now?.checkedInToday) return { outcome: "claimed", credit: now.todayRewardUnits, streak: now.streakDays }
-    return { outcome: "failed", message: "签到请求已发出，但状态没有更新" }
+  // 点页面上的「每日签到」按钮
+  const clicked = await page.evaluate(() => {
+    for (const b of document.querySelectorAll("button,[role=button]")) {
+      if ((b.innerText || "").trim() === "每日签到") { b.click(); return true }
+    }
+    return false
   })
+  if (!clicked) return { outcome: "failed", message: "页面上没有找到签到按钮" }
+
+  // 等结果：轮询签到状态
+  const deadline = Date.now() + 60000
+  while (Date.now() < deadline) {
+    await sleep(800)
+    const text = await page.evaluate(() => document.body?.innerText ?? "")
+    if (/签到成功|获得/.test(text)) {
+      const after = await readStatus(page, { timeoutMs: 8000 })
+      return {
+        outcome: "claimed",
+        credit: toDollars(after.checkin?.todayRewardUnits),
+        streak: after.checkin?.streakDays,
+      }
+    }
+    const after = await readStatus(page, { timeoutMs: 8000 })
+    if (after.checkin?.checkedInToday) {
+      return { outcome: "claimed", credit: toDollars(after.checkin.todayRewardUnits), streak: after.checkin.streakDays }
+    }
+  }
+  return { outcome: "failed", message: "点了签到按钮，但没看到成功提示" }
+}
+
+// 网站的金额单位是 1e10 = 1 美元（balanceUnits 4291302175 → $0.429）
+export const UNITS_PER_DOLLAR = 1e10
+export const toDollars = (units) => {
+  const n = Number(units)
+  return Number.isFinite(n) ? n / UNITS_PER_DOLLAR : undefined
+}
+export const money = (units) => {
+  const d = toDollars(units)
+  return d === undefined ? "" : `$${d.toFixed(d >= 1 ? 2 : 4)}`
 }
 
 export function walletCard(status) {
   const c = status.checkin
-  const balance = Number(status.balance)
+  const balance = toDollars(status.balance)
   const signedToday = c?.checkedInToday === true
   return {
-    plan: "钱包积分",
-    ...(Number.isFinite(balance) ? { balance, unit: "积分" } : {}),
+    plan: "钱包余额",
+    ...(balance !== undefined ? { balance, unit: "$" } : {}),
     windows: [{
       name: "每日签到",
       used: signedToday ? 100 : 0,
       display: c?.enabled === false
         ? "签到未开放"
         : signedToday
-          ? `今天已签 · 连签 ${c.streakDays ?? "?"} 天`
+          ? `今天已签 · 连签 ${c.streakDays ?? "?"} 天${c.todayRewardUnits ? ` · 获得 ${money(c.todayRewardUnits)}` : ""}`
           : "今天可签到",
       aside: true,
     }],
