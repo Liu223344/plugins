@@ -7,6 +7,20 @@ const NAME = "AutoBits AI Hub"
 const OPENAI_BASE = "https://ccx.autobits.cc/v1"
 const ANTHROPIC_BASE = "https://ccx.autobits.cc"
 const GEMINI_BASE = "https://ccx.autobits.cc/v1beta"
+const DEFAULT_BASE = OPENAI_BASE
+
+// 账号里存的 Base URL（用户自己填的）。空的话用官方地址。
+const baseOf = (auth) => {
+  const b = String(auth?.baseURL ?? auth?.baseUrl ?? auth?.metadata?.baseURL ?? "").trim()
+  return b || DEFAULT_BASE
+}
+// 用户填的通常是 OpenAI 兼容地址（…/v1）。Claude 用去掉 /v1 的根路径。
+const stripV1 = (b) => b.replace(/\/+$/, "").replace(/\/v1(beta)?$/, "")
+const openaiBaseOf = (b) => {
+  const s = b.replace(/\/+$/, "")
+  return /\/v1$/.test(s) ? s : `${stripV1(s)}/v1`
+}
+const anthropicBaseOf = (b) => stripV1(b)
 
 export function fingerprint(auth) {
   return auth?.profileId ?? auth?.apiKey ?? auth?.access ?? auth?.key ?? randomUUID()
@@ -33,14 +47,16 @@ export async function CCXPlugin({ client } = {}, options = {}) {
         const key = auth?.apiKey ?? auth?.access ?? auth?.key
         if (!key) return provider?.models ?? {}
         try {
-          const rows = await listModels(key)
+          // 用账号里存的 Base URL 拉模型（用户自己填的中转站地址）
+          const base = baseOf(auth)
+          const rows = await listModels(key, base)
           const out = { ...(provider?.models ?? {}) }
           for (const row of rows) {
             const id = row.id
-            // Claude 模型走 Anthropic 协议，其余走 OpenAI 兼容
+            // Claude 模型走 Anthropic 协议（根路径），其余走 OpenAI 兼容（/v1）
             const anthropic = /claude|sonnet|opus|haiku/i.test(id)
             const npm = anthropic ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible"
-            const url = anthropic ? ANTHROPIC_BASE : OPENAI_BASE
+            const url = anthropic ? anthropicBaseOf(base) : openaiBaseOf(base)
             const model = { name: row.name || id, api: { id, npm, url } }
             if (row.context) model.limit = { context: Number(row.context) }
             if (row.output) model.limit = { ...(model.limit ?? {}), output: Number(row.output) }
@@ -64,6 +80,14 @@ export async function CCXPlugin({ client } = {}, options = {}) {
           // 1. API Key（可留空，但留空就不能调模型）
           // 2. 复用哪个已登录的浏览器；选「开新窗口」才需要重新登录
           async ask(inputs = {}) {
+            if (!("baseURL" in inputs)) {
+              return {
+                type: "text",
+                key: "baseURL",
+                message: "API 请求地址（OpenAI 兼容）",
+                placeholder: DEFAULT_BASE,
+              }
+            }
             if (!("apiKey" in inputs)) {
               return {
                 type: "password",
@@ -87,9 +111,10 @@ export async function CCXPlugin({ client } = {}, options = {}) {
           },
           authorize(inputs) {
             const apiKey = String(inputs?.apiKey ?? "").trim()
+            const baseURL = String(inputs?.baseURL ?? "").trim() || DEFAULT_BASE
             const reuse = String(inputs?.profile ?? "").trim()
             const profile = reuse || freshProfile()
-            const auth = { type: "oauth", profileId: profile, apiKey, reuseProfile: reuse || undefined }
+            const auth = { type: "oauth", profileId: profile, apiKey, baseURL, reuseProfile: reuse || undefined }
             const pending = doSignIn(auth, { ...options })
               .then((info) => ({ ok: true, info }))
               .catch((e) => ({ ok: false, error: e?.message ?? String(e) }))
@@ -111,6 +136,7 @@ export async function CCXPlugin({ client } = {}, options = {}) {
                   refresh: "",
                   expires: 0,
                   apiKey,
+                  baseURL,
                   profileId: realId,
                   accountId: who,
                   username: r.info.username || r.info.email || "AutoBits 账号",
@@ -121,22 +147,25 @@ export async function CCXPlugin({ client } = {}, options = {}) {
         },
         {
           type: "api",
-          label: "只填 API Key（只调模型）",
+          label: "只填地址和 Key（只调模型）",
           prompts: [
+            { type: "text", key: "baseURL", message: "API 请求地址（OpenAI 兼容）", placeholder: DEFAULT_BASE },
             { type: "password", key: "apiKey", message: "AutoBits 的 LLM API Key", placeholder: "sk-..." },
           ],
           async authorize(inputs) {
             const key = String(inputs?.apiKey ?? "").trim()
+            const baseURL = String(inputs?.baseURL ?? "").trim() || DEFAULT_BASE
             if (!key) return { type: "failed", error: "请输入 API Key" }
-            return { type: "success", key }
+            // api 方法把答案放进 metadata，账号里就带着地址
+            return { type: "success", key, metadata: { apiKey: key, baseURL } }
           },
         },
       ],
       async loader(getAuth) {
         const auth = await getAuth()
         const key = auth?.apiKey ?? auth?.access ?? auth?.key
-        // 默认 OpenAI 兼容地址；Claude 模型在 models 里已各自指定 url
-        return { baseURL: OPENAI_BASE, apiKey: key }
+        // 用账号里存的地址；Claude 模型在 models 里已各自指定 url
+        return { baseURL: openaiBaseOf(baseOf(auth)), apiKey: key }
       },
       async usage(getAuth) {
         const auth = await getAuth()

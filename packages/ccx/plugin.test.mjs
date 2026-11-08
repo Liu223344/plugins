@@ -57,3 +57,27 @@ test("provider 配置有三个官方地址可用", async () => {
   assert.equal(p.api, "https://ccx.autobits.cc/v1")
   assert.equal(p.name, "AutoBits AI Hub")
 })
+test("登录会问 Base URL，并保存进账号", async () => {
+  const calls = []
+  const plugin = await CCXPlugin({}, { signIn: async (a) => { calls.push(a); return { username: "u", email: "e@x", balance: 1, profile: a.profileId } } })
+  const m = plugin.auth.methods[0]
+  assert.equal((await m.ask({}))?.key, "baseURL", "第一问问地址")
+  assert.equal((await m.ask({ baseURL: "" }))?.key, "apiKey", "第二问问 Key")
+  const r = await m.authorize({ baseURL: "https://ccx.autobits.cc/v1", apiKey: "sk-x", profile: "" }).callback()
+  assert.equal(r.baseURL, "https://ccx.autobits.cc/v1")
+  assert.equal(calls[0].baseURL, "https://ccx.autobits.cc/v1")
+})
+
+test("地址留空用官方地址", async () => {
+  const plugin = await CCXPlugin({}, { signIn: async (a) => ({ username: "u", email: "e@x", balance: 1, profile: a.profileId }) })
+  const r = await plugin.auth.methods[0].authorize({ baseURL: "", apiKey: "", profile: "" }).callback()
+  assert.equal(r.baseURL, "https://ccx.autobits.cc/v1")
+})
+
+test("只填 Key 的方法也要地址", async () => {
+  const plugin = await CCXPlugin({}, { signIn: async () => ({}) })
+  const m = plugin.auth.methods.find((x) => x.type === "api")
+  assert.equal(m.prompts[0].key, "baseURL")
+  const r = await m.authorize({ baseURL: "https://relay.example/v1", apiKey: "sk-y" })
+  assert.equal(r.metadata.baseURL, "https://relay.example/v1")
+})

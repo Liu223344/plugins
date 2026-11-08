@@ -164,15 +164,26 @@ export function walletCard(status) {
   }
 }
 
-// 模型列表：OpenAI 兼容的 /v1/models，用 API Key 拉取。
-// 返回的模型信息尽量完整（上下文长度、是否支持图片等），供 Magpie 展示。
-export async function listModels(key) {
+// 模型列表：OpenAI 兼容的 <base>/models，用 API Key 拉取。
+// base 是用户填的中转站地址（例如 https://ccx.autobits.cc/v1），默认官方地址。
+export async function listModels(key, base = `${SITE}/v1`) {
   if (!key) return []
-  const r = await fetch(`${SITE}/v1/models`, {
-    headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-  })
-  if (!r.ok) return []
-  const data = await r.json()
+  const root = String(base || `${SITE}/v1`).replace(/\/+$/, "")
+  // 依次试：<root>/models、<root>/v1/models、根路径/v1/models
+  const origin = (() => { try { return new URL(root).origin } catch { return SITE } })()
+  const tries = [...new Set([
+    `${root}/models`,
+    /\/v1$/.test(root) ? `${root}/models` : `${root}/v1/models`,
+    `${origin}/v1/models`,
+  ])]
+  let data = null
+  for (const url of tries) {
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${key}`, Accept: "application/json" } })
+    if (!r.ok) continue
+    const j = await r.json().catch(() => null)
+    if ((j?.data ?? j?.models ?? []).length) { data = j; break }
+  }
+  if (!data) return []
   const rows = data?.data ?? data?.models ?? []
   return rows.map((m) => {
     const id = m.id ?? m.model ?? m.name
